@@ -1,0 +1,484 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(dplyr,warn.conflicts = FALSE)
+options(dplyr.summarise.inform = FALSE)
+library(pROC)
+library(broom)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(e1071)
+library(C50)
+library(ROCR)
+library(pROC)
+library(ranger)
+library(readxl)
+library(evaluate)
+```
+
+```{r, message=FALSE}
+
+lcdb <- read_csv('lcDataSample5m.csv')
+
+lcdb <- lcdb %>% filter(loan_status== "Fully Paid" | loan_status== "Charged Off")
+
+```
+
+#Missing Values and NA values 
+```{r}
+
+###### Drop variables with 100% NA values
+
+lcdb <- lcdb %>% select_if(function(x){!all(is.na(x))})
+dim(lcdb)
+################columns where there are missing values
+
+colMeans(is.na(lcdb))[colMeans(is.na(lcdb))>0]
+dim(lcdb)
+###remove variables which have more than 60% missing values
+
+
+colMeans(is.na(lcdb))>0.6
+
+finalnona<-names(lcdb)[colMeans(is.na(lcdb))>0.6]
+final_lcdf <- lcdb %>% select(-finalnona)
+dim(final_lcdf)
+
+################### columns with remaining missing values
+colMeans(is.na(final_lcdf))[colMeans(is.na(final_lcdf))>0]
+#summary of data in these columnsfinal_lcdf
+nm<- names(final_lcdf)[colSums(is.na(final_lcdf))>0]
+summary(final_lcdf[, nm])
+
+######Replace missing values with some value###
+
+
+NoNAlcdf <- final_lcdf %>% replace_na(list(mths_since_last_delinq=500, revol_util=median(final_lcdf$revol_util, na.rm=TRUE), bc_open_to_buy=median(final_lcdf$bc_open_to_buy, na.rm=TRUE), mo_sin_old_il_acct=1000, mths_since_recent_bc=1000, mths_since_recent_inq=50, num_tl_120dpd_2m = median(lcdb$num_tl_120dpd_2m, na.rm=TRUE),percent_bc_gt_75 = median(final_lcdf$percent_bc_gt_75, na.rm=TRUE), bc_util=median(final_lcdf$bc_util, na.rm=TRUE)))
+
+#####To check if we have no more NA values #######
+
+colMeans(is.na(NoNAlcdf))[colMeans(is.na(NoNAlcdf))>0]
+
+
+```
+
+#Including only the selected variables from the given data sample of the Lending Club Data - splitting the data in 70:30 ration for training & test respectively
+```{r}
+mydata <- subset(lcdb, select = c(loan_amnt,int_rate,installment,grade,sub_grade,emp_length,home_ownership,annual_inc,verification_status,loan_status,dti,collections_12_mths_ex_med,total_rev_hi_lim,acc_open_past_24mths,avg_cur_bal,chargeoff_within_12_mths,delinq_amnt,mo_sin_old_rev_tl_op,mo_sin_rcnt_rev_tl_op,mo_sin_rcnt_tl,mort_acc,num_accts_ever_120_pd,num_actv_bc_tl,num_actv_rev_tl,num_bc_sats,num_bc_tl,num_il_tl,num_op_rev_tl,num_rev_accts,num_rev_tl_bal_gt_0,num_sats,num_tl_30dpd,num_tl_90g_dpd_24m,num_tl_op_past_12m,pct_tl_nvr_dlq,pub_rec_bankruptcies,tax_liens,tot_hi_cred_lim,total_bal_ex_mort,total_bc_limit,total_il_high_credit_limit))
+
+mydata <- mydata %>% filter(loan_status== "Fully Paid" | loan_status== "Charged Off")
+
+#It is useful to convert the categorical data into factor
+mydata$grade <- as.factor(mydata$grade)
+mydata$sub_grade<- as.factor(mydata$sub_grade)
+mydata$emp_length  <- as.factor(mydata$emp_length)
+mydata$home_ownership  <- as.factor(mydata$home_ownership)
+mydata$verification_status<- as.factor(mydata$verification_status)
+str(mydata)
+
+num_rows = nrow(mydata)
+
+colMeans(is.na(mydata))[colMeans(is.na(mydata))>0]
+
+#It can be useful to convert the target variable, loan_status to  a factor variable
+mydata$loan_status <- factor(mydata$loan_status, levels=c("Fully Paid", "Charged Off"))
+```
+
+
+
+```{r}
+set.seed(1234)
+rcount<- nrow(mydata)
+trainIndex <- sample(1:rcount, size = round(0.7*rcount), replace = FALSE)
+
+train <- mydata[trainIndex, ]
+test <- mydata[-trainIndex, ]
+
+ntest <- nrow(test)
+ntrain <- nrow(train)
+
+print("No of data records in Training Data set")
+ntrain
+round(ntrain/num_rows,1)
+
+print("No of data records in Test Data set")
+ntest
+round(ntest/num_rows,1)
+
+```
+
+Deriving the Decision Tree from the Training Data and then obtaining the predictions of Test Data
+```{r}
+#Q 5B. in the following chunk
+set.seed(1231)
+#make the DT moel using rpart
+lc_DT1 <- rpart(loan_status ~., data=train, method="class", parms = list(split = "information", prior=c(0.95, 0.05)), control = rpart.control(cp=0.00009),maxdepth=10,minsplit=10)
+
+# prune the tree
+pfit<- prune(lc_DT1, cp= lc_DT1$cptable[which.min(lc_DT1$cptable[,"xerror"]),"CP"])
+
+#Obtain the model's predictions on the training data
+predTrn=predict(lc_DT1, train, type='class')
+#Confusion table - rpart
+table(pred = predTrn, true=train$loan_status)
+#Accuracy - rpart
+mean(predTrn==train$loan_status)
+
+#Model's predictions on test data - rpart
+predTst =predict(lc_DT1,test, type='class')
+table(pred = predTst, true=test$loan_status)
+#accuracy on test data - rpart
+mean(predTst == test$loan_status)
+
+#AUC plot - rpart
+predDT3<-predict(lc_DT1,test, type="prob")[,2]
+DT3=prediction(predDT3, test$loan_status,label.ordering = c("Fully Paid","Charged Off"))
+aucPerf_DT=performance(DT3, "tpr", "fpr")
+plot(aucPerf_DT, main = "AUC plot for DT using rpart")
+abline(a=0, b= 1)
+
+#AUC value - rpart
+aucPerf=performance(DT3, "auc")
+aucPerf@y.values
+
+#Lift curve - rpart
+liftPerf <-performance(DT3, "lift", "rpp")
+plot(liftPerf, main = "lift curve for DT using rpart")
+
+#Varaible Importance
+print("Variable importnace for DT with rpart")
+Vimp <- (sort(lc_DT1$variable.importance, decreasing = TRUE))
+Vimp <- Vimp[1:10]
+plot(Vimp, main = "Top 10 Variables by Importance for Decision Tree", cex = 0.8)
+plot(sort(lc_DT1$variable.importance, decreasing = TRUE),main = "Variable Imp with rpart")
+```
+
+Using C50 - Decision Tree
+```{r}
+#install.packages("C50")
+library(C50)
+set.seed(1234)
+
+#Model using C50
+use_form <- C5.0(loan_status~ .,train,prior=c(0.95, 0.05),control = C5.0Control(seed=1))
+
+#Obtain the model's predictions on the training data - C50
+predTrn1=predict(use_form, train, type='class')
+#Accuracy - C50
+mean(predTrn1==train$loan_status)
+
+#Model's predictions on test data & Confusion Matrix - C50
+predTstC50 =predict(use_form,test, type="class")
+#accuracy on test data - C50
+mean(predTstC50 == test$loan_status)
+
+#AUC plot - C50
+predDTC50<-predict(use_form,test, type="prob")[,2]
+DT4=prediction(predDTC50, test$loan_status,label.ordering = c("Fully Paid","Charged Off"))
+aucPerf_DTC50=performance(DT4, "tpr", "fpr")
+plot(aucPerf_DTC50, main = "AUC plot for C50")
+abline(a=0, b= 1)
+
+#AUC value - C50
+aucPerfC50=performance(DT4, "auc")
+aucPerfC50@y.values
+
+```
+Random Forest Model 1 with 50 trees
+```{r}
+library(ROSE)
+set.seed(1235)
+rgModel<- ranger(formula =loan_status~.,data=train,num.trees=50,importance='impurity',probability = TRUE)
+rgModel   
+#Executing the model also gives us the Out of Bag error - here it is 12.36
+# #Predict model using training data
+
+predTrn2 <- predict(rgModel,train)
+predTst2 <- predict(rgModel,test)
+
+##Confusion Matrix on test data
+#print("Matrix for 50 trees")
+#a <- table(train$loan_status,predictions(predTrn2))
+#confusionMatrix(a, positive = "Charged Off")
+
+#b <- table(predictions(predTst2),test$loan_status)
+#confusionMatrix(b, positive = "Charged Off")
+
+#Predict model using training data
+
+tstPredictions1 <- predict(rgModel,test)$predictions
+scoreRF1 <- tstPredictions1[,"Charged Off"]
+predRF1 <- prediction(scoreRF1, test$loan_status, label.ordering = c("Fully Paid","Charged Off"))
+print(predRF1)
+
+#Plot Lift Curve
+
+liftcurve1 = performance(predRF1,"lift", "rpp")
+plot(liftcurve1)
+
+
+```
+
+#Random Forest Model 2 with 100 trees
+```{r}
+#ROC Curve
+library(ROCR)
+#install.packages("Random forest")
+
+#Build Model
+set.seed(123)
+rgModel1<- ranger(formula = loan_status~.,data=train,num.trees=100,importance="impurity",probability = TRUE)
+rgModel1
+
+#Predict model using training data
+
+tstPredictions <- predict(rgModel1,test)$predictions
+scoreRF <- tstPredictions[,"Charged Off"]
+predRF <- prediction(scoreRF, test$loan_status, label.ordering = c("Fully Paid","Charged Off"))
+print(predRF)
+
+summary(train$loan_status)
+##Confusion Matrix on test data
+
+predTrn3 <- predict(rgModel1,train)
+predTst3 <- predict(rgModel1,test)
+#print("Matrix for 100 trees")
+#a1 <- table(predictions(predTrn3),train$loan_status)
+#confusionMatrix(a, positive = "Charged Off")
+
+#b1 <- table(predictions(predTst3),test$loan_status)
+#confusionMatrix(b, positive = "Charged Off")
+
+
+#Plot Lift Curve
+liftcurve = performance(predRF,"lift", "rpp")
+plot(liftcurve)
+
+#variable importance comparison
+print("Random Forest Model 1 with 50 trees")
+plot(sort(rgModel$variable.importance, decreasing = TRUE),main = "Variable Imp with 50 trees")
+
+print("Random Forest Model 2 with 100 trees")
+plot(sort(rgModel1$variable.importance*1000, decreasing = TRUE), col = 'red', main = "Variable Imp with 100 trees")
+
+print("Variable importnace for RF1")
+Vimp1 <- (sort(rgModel$variable.importance, decreasing = TRUE))
+Vimp1 <- Vimp1[1:10]
+Vimp1
+
+print("Variable importnace for RF2")
+Vimp2 <- (sort(rgModel1$variable.importance, decreasing = TRUE))
+Vimp2 <- Vimp2[1:10]
+plot(Vimp2, main = "Top 10 Variables by Importance for Random Forest", cex = 0.8)
+
+
+#Auc Comprison of both Random Forest Models
+print("Random Forest Model 1 with 50 trees")
+aucPerfRF1 <- performance(predRF1, "tpr", "fpr")
+plot(aucPerfRF1)
+abline(a=0, b=1)
+print("AUC Value for Random Forest Model 1 with 50 trees")
+aucPerf_RF1=performance(predRF1, "auc")
+aucPerf_RF1@y.values
+
+
+
+print("Random Forest Model 2 with 100 trees")
+aucPerfRF <- performance(predRF, "tpr", "fpr")
+plot(aucPerfRF)
+abline(a=0, b=1)
+print("AUC Value for Random Forest Model 1 with 100 trees")
+aucPerf_RF=performance(predRF, "auc")
+aucPerf_RF@y.values
+
+
+```
+
+##Consolidated ROC Curve for DT & Random Forest - We have used rpart for DT
+```{r}
+
+#Consolidated ROC Curve
+perfROC_rfTst <- performance(predRF, "tpr", "fpr")
+plot(perfROC_rfTst, col='red', main = "Consolidated AUC for Random Forest & Decision Tree", cex = 0.6)
+plot(aucPerf_DT, col='green', add=TRUE)
+legend('bottomright', c('RandomForest','Rpart'), lty=1, col=c('red','green'), cex = 0.8)
+
+```
+
+
+```{r}
+#calculate Actual Term
+lcdb$last_pymnt_d<-paste(lcdb$last_pymnt_d, "-01", sep = "")
+
+lcdb$nlast_pymnt_d<-parse_date_time(lcdb$last_pymnt_d,  "myd")
+lcdb$actualTerm <- ifelse(lcdb$loan_status=="Fully Paid", as.duration(lcdb$issue_d  %--% lcdb$nlast_pymnt_d)/dyears(1), 3)
+
+#Calculate Annual Return
+lcdb$annRet <- ((lcdb$total_pymnt -lcdb$funded_amnt)/lcdb$funded_amnt)*(12/36)*100
+
+#Calculate Actual Return
+lcdb$actualReturn <- ifelse(lcdb$actualTerm>0, ((lcdb$total_pymnt - lcdb$funded_amnt)/lcdb$funded_amnt)*(1/lcdb$actualTerm), 0)
+
+#Table to see the ACTUAL INTEREST & ACTUAL TERM against the loan status 
+lcdb %>% group_by(loan_status) %>% summarise(avgInt=mean(int_rate),avgActInt = mean(actualReturn),avgTerm=mean(actualTerm)) %>% view()
+
+lcdb %>% select(loan_status, loan_amnt, total_pymnt, int_rate, actualTerm, actualReturn ) %>% view()
+
+
+PROFITVAL <- 18 #profit (on $100) from accurately identifying Fully_paid loans
+COSTVAL <- -35 # loss (on $100) from incorrectly predicting a Charged_Off loan as Full_paid
+
+tstPredictions2 <- predict(rgModel1,test)$predictions
+scoreRF2 <- tstPredictions2[,"Fully Paid"]
+
+prPerfRF2 <- data.frame(scoreRF2)
+prPerfRF2 <- cbind(prPerfRF2, status=test$loan_status)
+prPerfRF2 <- prPerfRF2[order(-scoreRF2) ,] #sort in desc order of prob(fully_paid)
+prPerfRF2$profit <- ifelse(prPerfRF2$status == 'Fully Paid', PROFITVAL, COSTVAL)
+prPerfRF2$cumProfit <- cumsum(prPerfRF2$profit)
+plot(prPerfRF2$cumProfit)
+
+#to compare against the default approach of investing in CD with 2% int (i.e. $6 profit out of $100 in 3 years)
+prPerfRF2$cdRet <- 6
+prPerfRF2$cumCDRet <- cumsum(prPerfRF2$cdRet)
+plot(prPerfRF2$cumProfit, main = "Cumulative Profit Comparison")
+lines(prPerfRF2$cumCDRet, col='green')
+
+```
+
+```{r}
+###Profit Loss Calculations for Decision Tree
+predTst1 <- predict(lc_DT1,test)
+scoreDT3 <- predTst1[,"Fully Paid"]
+prPerfDT3 <- data.frame(scoreDT3)
+prPerfDT3 <- cbind(prPerfDT3, status=test$loan_status)
+prPerfDT3 <- prPerfDT3[order(-scoreDT3) ,] #sort in desc order of prob(fully_paid)
+prPerfDT3$profit <- ifelse(prPerfDT3$status == 'Fully Paid', PROFITVAL, COSTVAL)
+prPerfDT3$cumProfit <- cumsum(prPerfDT3$profit)
+plot(prPerfDT3$cumProfit)
+
+#to compare against the default approach of investing in CD with 2% int (i.e. $6 profit out of $100 in 3 years)
+prPerfDT3$cdRet <- 6
+prPerfDT3$cumCDRet <- cumsum(prPerfRF2$cdRet)
+plot(prPerfDT3$cumProfit, main = "Cumulative Profit Comparison")
+lines(prPerfDT3$cumCDRet, col='green')
+
+
+```
+
+```{r}
+#XGBoost implementataion
+
+library(xgboost)
+#Needs all data to be numeric -- so we convert categorical (i.e. factor) variables using one-hot encoding – multiple ways to do this
+# use the dummyVars function in the 'caret' package to convert factor variables to # dummy-variables
+fdum<-dummyVars(~.,data=mydata %>% select(-loan_status)) #do not include loan_status for this
+dxlcdf <- predict(fdum, mydata)
+# for loan_status, check levels and convert to dummy vars and keep the class label of interest
+levels(mydata$loan_status)
+dylcdf <- class2ind(as.factor(mydata$loan_status), drop2nd = FALSE)
+# and then decide which one to keep
+#fplcdf <- dylcdf [ , 1] # or,
+colcdf <- dylcdf [ , 2]
+#Training, test subsets
+dxlcdfTrn <- dxlcdf[trainIndex,]  #Training set from Whole data
+colcdfTrn <- colcdf[trainIndex]   #Training Data from Only Charged OFF
+dxlcdfTst <- dxlcdf[-trainIndex,]
+colcdfTst <- colcdf[-trainIndex]
+
+dxTrn <- xgb.DMatrix(dxlcdfTrn,label=colcdfTrn)
+dxTst <- xgb.DMatrix(dxlcdfTst,label=colcdfTst)
+xgbWatchlist <- list(train = dxTrn, eval = dxTst)
+#we can watch the progress of learning thru performance on these datasets
+#list of parameters for the xgboost model development functions
+xgbParam <- list (
+max_depth = 5, eta = 0.01,
+objective = "binary:logistic",
+eval_metric="error", eval_metric = "auc")
+#can specify which evaluation metrics we want to watch
+xgb_lsM1 <- xgb.train( xgbParam, dxTrn, nrounds = 500,
+xgbWatchlist, early_stopping_rounds = 10 )
+xgb_lsM1$best_iteration
+xpredTrg<-predict(xgb_lsM1, dxTrn)
+head(xpredTrg)
+#use cross-validation on training dataset to determine best model
+xgbParam <- list (
+max_depth = 6, eta = 0.1,
+objective = "binary:logistic",
+eval_metric="error", eval_metric = "auc")
+xgb_lscv <- xgb.cv( xgbParam, dxTrn, nrounds = 500, nfold=5, early_stopping_rounds = 10 )
+#best iteration
+xgb_lscv$best_iteration
+# or for the best iteration based on performance measure (among those specified in xgbParam)
+best_cvIter <- which.max(xgb_lscv$evaluation_log$test_auc_mean)
+#which.min(xgb_lscv$evaluation_log$test_error_mean)
+#best model
+xgb_lsbest <- xgb.train( xgbParam, dxTrn, nrounds = xgb_lscv$best_iteration )
+#variable importance
+xgb.importance(model = xgb_lsbest) %>% view()
+importance_matrix1 <- xgb.importance(model = xgb_lsbest)
+xgb.plot.importance(importance_matrix1)
+
+# xgbParamGrid <- expand.grid(
+# max_depth = c(2, 5),
+# eta = c(0.001, 0.01, 0.1) )
+# xgbParamGrid
+# 
+# xgbParam <- list (
+# booster = "gbtree",
+# objective ="binary:logistic",
+# #eta=0.01, #learning rate
+# #max_depth=5,
+# min_child_weight=1,
+# colsample_bytree=0.6
+# )
+# 
+# for(i in 1:nrow(xgbParamGrid)) {
+# xgb_tune<- xgb.train(data=dxTrn,xgbParam,
+# nrounds=1000, early_stopping_rounds = 10, xgbWatchlist,
+# eta=xgbParamGrid$eta[i], max_depth=xgbParamGrid$max_depth[i] )
+# xgbParamGrid$bestTree[i] <- xgb_tune$evaluation_log[xgb_tune$best_iteration]$iter
+# xgbParamGrid$bestPerf[i] <- xgb_tune$evaluation_log[xgb_tune$best_iteration]$eval_auc
+# }
+
+#confusion matrix
+table(pred=as.numeric(xpredTrg>0.5), act=colcdfTrn)
+
+#AUC performance
+xpredTst<-predict(xgb_lsM1, dxTst)
+pred_xgb_lsM1=prediction(xpredTst, test$loan_status,label.ordering = c("Fully Paid","Charged Off"))
+aucPerf_xgb_lsM1=performance(pred_xgb_lsM1, "tpr", "fpr")
+plot(aucPerf_xgb_lsM1)
+abline(a=0, b= 1)
+
+
+print("AUC Value for BGBoost Model")
+aucPerf_RF1=performance(pred_xgb_lsM1, "auc")
+aucPerf_RF1@y.values
+```
+#Comparision of DT & RF & XGboost
+```{r}
+
+perfROC_rfTst <- performance(predRF, "tpr", "fpr")
+plot(perfROC_rfTst, col='red', main = "Consolidated AUC for Random Forest & Decision Tree", cex = 0.6)
+plot(aucPerf_DT, col='green', add=TRUE)
+plot(aucPerf_xgb_lsM1, col='blue', add=TRUE)
+legend('bottomright', c('RandomForest','Rpart','XGBoost'), lty=1,col=c('red','green','blue'), cex = 0.8)
+
+```
+## We can conclude that random forest is better than decision tree because of the ROC curve performance evaluation
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
